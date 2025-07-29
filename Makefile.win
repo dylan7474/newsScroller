@@ -1,0 +1,33 @@
+# Makefile for Windows cross-compilation from Linux
+#
+# To compile, run: make -f Makefile.win
+# To run on Windows, execute the generated news_ticker.exe
+#
+# This assumes you have set up the MinGW cross-compiler and libraries
+# for SDL2, SDL2_ttf, and libcurl.
+
+CC = x86_64-w64-mingw32-gcc
+TARGET = news_ticker.exe
+# Add cJSON.c to the source files
+SRCS = main.c cJSON.c
+
+# CFLAGS includes paths to the cross-compiled SDL2 headers and defines for static linking
+CFLAGS = -I/usr/x86_64-w64-mingw32/include/SDL2 \
+         -I/usr/x86_64-w64-mingw32/include \
+         -Wall -O2 -DCURL_STATICLIB -I.
+
+# LDFLAGS links against all necessary Windows and SDL libraries, including SDL2_ttf
+# **FIX:** Added -lrpcrt4 to link against the required Windows UUID library.
+LDFLAGS = -L/usr/x86_64-w64-mingw32/lib \
+          -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf -lSDL2_mixer \
+          -lcurl -lbcrypt -lpthread -lws2_32 -lcrypt32 \
+          -lwldap32 -lgdi32 -lwinmm -limm32 -lole32 \
+          -loleaut32 -lversion -lsetupapi -lrpcrt4 -lm -mwindows -static
+
+all: $(TARGET)
+
+$(TARGET): $(SRCS) cJSON.h
+	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
+
+clean:
+	rm -f $(TARGET)
