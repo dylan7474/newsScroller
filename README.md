@@ -14,13 +14,17 @@ Configuration
   - `font_path`: path to the `.ttf` font used for rendering. The ticker falls back to DejaVu Sans if the file is missing.
   - `font_size`: positive integer controlling line height.
   - `country_code`: two-letter ISO country code used in the NewsAPI request.
+  - `refresh_interval_seconds`: optional interval for background re-fetching; set to `0` to disable reloads.
+  - `line_padding`: vertical spacing between rendered lines in pixels.
+  - `scroll_speed_min` / `scroll_speed_max`: lower and upper bounds (pixels/second) for randomly assigned scroll speeds.
 - The app reports configuration issues in stderr and in the ticker itself when it has to fall back.
 
 Runtime
 -------
 - Launch with `./news_ticker`; the window stretches to your desktop resolution.
 - SPACE pauses or resumes scrolling; ESC exits.
-- Live headlines scroll independently with delta-time based speeds; when changes are paused the delta clock is reset to avoid jumps.
+- Live headlines scroll independently with delta-time based speeds bounded by your configured min/max slider; when changes are paused the delta clock is reset to avoid jumps.
+- When `refresh_interval_seconds` is greater than zero, the ticker re-fetches headlines on that cadence without losing scroll state; failures reuse the existing fallback messaging.
 - If NewsAPI is unreachable, the ticker retries with exponential backoff, then displays a clearly labeled fallback playlist with the failure reason.
 
 Verification

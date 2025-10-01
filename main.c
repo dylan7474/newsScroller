@@ -31,6 +31,10 @@ struct Config {
     char font_path[256];
     char country_code[8]; // Added country code
     int font_size;
+    int refresh_interval_seconds;
+    int line_padding;
+    float scroll_speed_min;
+    float scroll_speed_max;
     SDL_Color background_color;
     SDL_Color colors[10];
     int num_colors;
@@ -57,9 +61,10 @@ struct MemoryStruct {
 
 // --- Constants ---
 #define MAX_LINES 20 // Maximum number of headlines to display
-#define LINE_PADDING 10 // Vertical space between lines
-#define MIN_SCROLL_SPEED 90.0f // Pixels per second
-#define MAX_SCROLL_SPEED 220.0f // Pixels per second
+#define DEFAULT_LINE_PADDING 10
+#define DEFAULT_SCROLL_SPEED_MIN 90.0f
+#define DEFAULT_SCROLL_SPEED_MAX 220.0f
+#define DEFAULT_REFRESH_INTERVAL_SECONDS 0
 #define MAX_FETCH_ATTEMPTS 3
 
 #define STATUS_BUFFER 256
@@ -80,10 +85,13 @@ void render_text(SDL_Renderer* renderer, TTF_Font* font, struct NewsLine* line);
 void trim_whitespace(char *str);
 char* sanitize_headline(const char *title);
 void release_news_line(struct NewsLine *line);
-bool init_news_line(struct NewsLine *line, SDL_Renderer *renderer, TTF_Font *font, char *text, bool owns_text, SDL_Color color, int screen_width, int screen_height, int *y_cursor);
+bool init_news_line(struct NewsLine *line, SDL_Renderer *renderer, TTF_Font *font, char *text, bool owns_text, SDL_Color color, int screen_width, int screen_height, int *y_cursor, const struct Config *config);
 void append_message(char *buffer, size_t len, const char *message);
 char normalize_ascii_char(unsigned char c);
 size_t utf8_sequence_length(unsigned char lead_byte);
+void clear_news_lines(struct NewsLine *lines, int count);
+int rebuild_headlines(struct Config *config, SDL_Renderer *renderer, TTF_Font *font, struct NewsLine *news_lines, int screen_width, int screen_height, const char *config_error_message, char *status_out, size_t status_len, bool *used_fallback_out);
+static int fetch_newsapi_headlines(const struct Config *config, SDL_Renderer *renderer, TTF_Font *font, struct NewsLine *news_lines, int screen_width, int screen_height, int *y_cursor, char *fetch_error, size_t fetch_error_len);
 
 
 // --- Main Function ---
@@ -131,141 +139,16 @@ int main(int argc, char* argv[]) {
     // --- Data Structures for News ---
     struct NewsLine news_lines[MAX_LINES] = {0};
     int num_headlines = 0;
-    bool use_fallback = false;
-    int y_cursor = LINE_PADDING;
-    char fetch_error[STATUS_BUFFER] = {0};
+    bool used_fallback = false;
+    char load_status[STATUS_BUFFER] = {0};
 
-    // --- Fetch and Parse News ---
-    char api_url[512];
-    // Use the country_code from the config struct
-    snprintf(api_url, sizeof(api_url), "https://newsapi.org/v2/top-headlines?country=%s&pageSize=%d&apiKey=%s", config.country_code, MAX_LINES, config.api_key);
-
-    fprintf(stdout, "Attempting to fetch news from: %s\n", api_url);
-
-    CURL* curl_handle = curl_easy_init();
-    if (!curl_handle) {
-        snprintf(fetch_error, sizeof(fetch_error), "Unable to initialize network client.");
-        use_fallback = true;
-    } else {
-        curl_easy_setopt(curl_handle, CURLOPT_URL, api_url);
-        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-        curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "news-ticker/1.0");
-        curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT_MS, 5000L);
-        char curl_error[CURL_ERROR_SIZE] = {0};
-        curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, curl_error);
-
-        for (int attempt = 0; attempt < MAX_FETCH_ATTEMPTS && num_headlines == 0; ++attempt) {
-            struct MemoryStruct chunk = { .memory = malloc(1), .size = 0 };
-            curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
-            CURLcode res = curl_easy_perform(curl_handle);
-
-            if (res != CURLE_OK) {
-                snprintf(fetch_error, sizeof(fetch_error), "Request failed (%s)", curl_error[0] ? curl_error : curl_easy_strerror(res));
-            } else {
-                cJSON* json = cJSON_Parse(chunk.memory);
-                if (json == NULL) {
-                    snprintf(fetch_error, sizeof(fetch_error), "NewsAPI returned invalid JSON.");
-                } else {
-                    cJSON* status = cJSON_GetObjectItemCaseSensitive(json, "status");
-                    if (!cJSON_IsString(status) || strcmp(status->valuestring, "ok") != 0) {
-                        snprintf(fetch_error, sizeof(fetch_error), "NewsAPI error: status != ok.");
-                    } else {
-                        cJSON* articles = cJSON_GetObjectItemCaseSensitive(json, "articles");
-                        cJSON* article = NULL;
-                        cJSON_ArrayForEach(article, articles) {
-                            if (!cJSON_IsObject(article)) continue;
-                            if (num_headlines >= MAX_LINES) break;
-                            cJSON* title_json = cJSON_GetObjectItemCaseSensitive(article, "title");
-                            if (!cJSON_IsString(title_json) || !title_json->valuestring) continue;
-
-                            char* sanitized = sanitize_headline(title_json->valuestring);
-                            if (!sanitized || sanitized[0] == '\0') {
-                                if (sanitized) free(sanitized);
-                                continue;
-                            }
-
-                            size_t final_len = strlen(sanitized) + 2;
-                            char* headline = malloc(final_len);
-                            if (!headline) {
-                                free(sanitized);
-                                snprintf(fetch_error, sizeof(fetch_error), "Out of memory building headline.");
-                                break;
-                            }
-                            snprintf(headline, final_len, "%s ", sanitized);
-                            free(sanitized);
-
-                            SDL_Color color = config.colors[rand() % config.num_colors];
-                            if (init_news_line(&news_lines[num_headlines], renderer, font, headline, true, color, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
-                                num_headlines++;
-                            }
-                        }
-                        if (num_headlines > 0) {
-                            fetch_error[0] = '\0';
-                        }
-                    }
-                    cJSON_Delete(json);
-                }
-            }
-
-            free(chunk.memory);
-            if (num_headlines > 0) {
-                break;
-            }
-            if (attempt < MAX_FETCH_ATTEMPTS - 1) {
-                SDL_Delay(250 * (attempt + 1));
-            }
-        }
-        curl_easy_cleanup(curl_handle);
-        if (num_headlines == 0) {
-            use_fallback = true;
-        }
+    num_headlines = rebuild_headlines(&config, renderer, font, news_lines, SCREEN_WIDTH, SCREEN_HEIGHT, config_error, load_status, sizeof(load_status), &used_fallback);
+    if (load_status[0]) {
+        fprintf(stdout, "%s\n", load_status);
     }
 
-    if (use_fallback || num_headlines == 0) {
-        fprintf(stderr, "Using fallback headlines.\n");
-        for (int i = 0; i < MAX_LINES; ++i) {
-            release_news_line(&news_lines[i]);
-        }
-        num_headlines = 0;
-        y_cursor = LINE_PADDING;
-
-        if (!config_ok && config_error[0]) {
-            size_t len = strlen(config_error) + 2;
-            char* error_line = malloc(len);
-            if (error_line) {
-                snprintf(error_line, len, "%s", config_error);
-                if (init_news_line(&news_lines[num_headlines], renderer, font, error_line, true, (SDL_Color){255, 80, 80, 255}, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
-                    num_headlines++;
-                }
-            }
-        }
-
-        if (fetch_error[0]) {
-            size_t len = strlen(fetch_error) + 32;
-            char* status_line = malloc(len);
-            if (status_line) {
-                snprintf(status_line, len, "Falling back: %s", fetch_error);
-                if (init_news_line(&news_lines[num_headlines], renderer, font, status_line, true, (SDL_Color){255, 160, 0, 255}, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
-                    num_headlines++;
-                }
-            }
-        }
-
-        for (int i = 0; fallback_news[i] != NULL && i < MAX_LINES; ++i) {
-            if (num_headlines >= MAX_LINES) break;
-            char* fallback_copy = NULL;
-            size_t len = strlen(fallback_news[i]) + 1;
-            fallback_copy = malloc(len);
-            if (!fallback_copy) {
-                continue;
-            }
-            snprintf(fallback_copy, len, "%s", fallback_news[i]);
-            SDL_Color color = config.colors[rand() % config.num_colors];
-            if (init_news_line(&news_lines[num_headlines], renderer, font, fallback_copy, true, color, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
-                num_headlines++;
-            }
-        }
-    }
+    Uint32 refresh_interval_ms = (Uint32)config.refresh_interval_seconds * 1000;
+    Uint32 last_refresh_ticks = SDL_GetTicks();
 
     // --- Main Loop ---
     bool is_running = true;
@@ -282,7 +165,23 @@ int main(int argc, char* argv[]) {
         }
 
         Uint32 current_ticks = SDL_GetTicks();
-        float delta_seconds = (current_ticks - last_ticks) / 1000.0f;
+
+        if (refresh_interval_ms > 0 && SDL_TICKS_PASSED(current_ticks, last_refresh_ticks + refresh_interval_ms)) {
+            bool refresh_fallback = false;
+            char refresh_status[STATUS_BUFFER] = {0};
+            num_headlines = rebuild_headlines(&config, renderer, font, news_lines, SCREEN_WIDTH, SCREEN_HEIGHT, config_error, refresh_status, sizeof(refresh_status), &refresh_fallback);
+            last_refresh_ticks = SDL_GetTicks();
+            last_ticks = last_refresh_ticks;
+            current_ticks = last_refresh_ticks;
+            if (refresh_status[0]) {
+                fprintf(stdout, "%s\n", refresh_status);
+            }
+        }
+
+        float delta_seconds = 0.0f;
+        if (!is_paused) {
+            delta_seconds = (current_ticks - last_ticks) / 1000.0f;
+        }
         last_ticks = current_ticks;
 
         // --- Update ---
@@ -294,8 +193,6 @@ int main(int argc, char* argv[]) {
                     news_lines[i].scroll_x = SCREEN_WIDTH + (rand() % 500);
                 }
             }
-        } else {
-            last_ticks = current_ticks;
         }
 
         // --- Drawing ---
@@ -312,7 +209,7 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Cleanup ---
-    for (int i = 0; i < num_headlines; ++i) {
+    for (int i = 0; i < MAX_LINES; ++i) {
         release_news_line(&news_lines[i]);
     }
     TTF_CloseFont(font);
@@ -369,6 +266,10 @@ bool parse_config(struct Config* config, char *error_message, size_t message_len
     strcpy(config->font_path, "font.ttf");
     strcpy(config->country_code, "us"); // Default to US
     config->font_size = 28;
+    config->refresh_interval_seconds = DEFAULT_REFRESH_INTERVAL_SECONDS;
+    config->line_padding = DEFAULT_LINE_PADDING;
+    config->scroll_speed_min = DEFAULT_SCROLL_SPEED_MIN;
+    config->scroll_speed_max = DEFAULT_SCROLL_SPEED_MAX;
     config->background_color = (SDL_Color){20, 20, 20, 255};
     config->colors[0] = (SDL_Color){255, 165, 0, 255}; // Amber
     config->colors[1] = (SDL_Color){0, 255, 255, 255};   // Cyan
@@ -401,6 +302,10 @@ bool parse_config(struct Config* config, char *error_message, size_t message_len
             else if (strcmp(key, "font_path") == 0) strcpy(config->font_path, value);
             else if (strcmp(key, "font_size") == 0) config->font_size = atoi(value);
             else if (strcmp(key, "country_code") == 0) strncpy(config->country_code, value, sizeof(config->country_code) - 1);
+            else if (strcmp(key, "refresh_interval_seconds") == 0) config->refresh_interval_seconds = atoi(value);
+            else if (strcmp(key, "line_padding") == 0) config->line_padding = atoi(value);
+            else if (strcmp(key, "scroll_speed_min") == 0) config->scroll_speed_min = (float)atof(value);
+            else if (strcmp(key, "scroll_speed_max") == 0) config->scroll_speed_max = (float)atof(value);
         }
     }
     fclose(file);
@@ -421,6 +326,32 @@ bool parse_config(struct Config* config, char *error_message, size_t message_len
         valid = false;
     }
 
+    if (config->refresh_interval_seconds < 0) {
+        append_message(error_message, message_len, "refresh_interval_seconds must be non-negative; using 0.");
+        config->refresh_interval_seconds = DEFAULT_REFRESH_INTERVAL_SECONDS;
+        valid = false;
+    }
+
+    if (config->line_padding < 0) {
+        append_message(error_message, message_len, "line_padding must be non-negative; using default spacing.");
+        config->line_padding = DEFAULT_LINE_PADDING;
+        valid = false;
+    }
+
+    if (config->scroll_speed_min <= 0.0f) {
+        append_message(error_message, message_len, "scroll_speed_min must be positive; using defaults.");
+        config->scroll_speed_min = DEFAULT_SCROLL_SPEED_MIN;
+        config->scroll_speed_max = DEFAULT_SCROLL_SPEED_MAX;
+        valid = false;
+    }
+
+    if (config->scroll_speed_max <= config->scroll_speed_min) {
+        append_message(error_message, message_len, "scroll_speed_max must be greater than scroll_speed_min; using defaults.");
+        config->scroll_speed_min = DEFAULT_SCROLL_SPEED_MIN;
+        config->scroll_speed_max = DEFAULT_SCROLL_SPEED_MAX;
+        valid = false;
+    }
+
     size_t code_len = strlen(config->country_code);
     if (code_len != 2) {
         append_message(error_message, message_len, "country_code must be a 2-letter ISO code.");
@@ -436,7 +367,7 @@ bool parse_config(struct Config* config, char *error_message, size_t message_len
         fclose(font_check);
     }
 
-    fprintf(stdout, "Config loaded: Country='%s', Font='%s', Size=%d\n", config->country_code, config->font_path, config->font_size);
+    fprintf(stdout, "Config loaded: Country='%s', Font='%s', Size=%d, Refresh=%ds\n", config->country_code, config->font_path, config->font_size, config->refresh_interval_seconds);
 
     return valid;
 }
@@ -528,8 +459,15 @@ void release_news_line(struct NewsLine *line) {
     line->y_position = 0;
 }
 
-bool init_news_line(struct NewsLine *line, SDL_Renderer *renderer, TTF_Font *font, char *text, bool owns_text, SDL_Color color, int screen_width, int screen_height, int *y_cursor) {
-    if (!line || !renderer || !font || !text || !y_cursor) {
+void clear_news_lines(struct NewsLine *lines, int count) {
+    if (!lines) return;
+    for (int i = 0; i < count; ++i) {
+        release_news_line(&lines[i]);
+    }
+}
+
+bool init_news_line(struct NewsLine *line, SDL_Renderer *renderer, TTF_Font *font, char *text, bool owns_text, SDL_Color color, int screen_width, int screen_height, int *y_cursor, const struct Config *config) {
+    if (!line || !renderer || !font || !text || !y_cursor || !config) {
         if (owns_text) free(text);
         return false;
     }
@@ -545,18 +483,245 @@ bool init_news_line(struct NewsLine *line, SDL_Renderer *renderer, TTF_Font *fon
         return false;
     }
 
-    if (*y_cursor + line->texture_height > screen_height - LINE_PADDING) {
+    int padding = config->line_padding < 0 ? 0 : config->line_padding;
+    int max_y = screen_height - padding;
+    if (max_y < 0) {
+        max_y = 0;
+    }
+    if (*y_cursor + line->texture_height > max_y) {
         release_news_line(line);
         return false;
     }
 
     line->y_position = *y_cursor;
-    *y_cursor += line->texture_height + LINE_PADDING;
+    *y_cursor += line->texture_height + padding;
     float random_factor = rand() / (float)RAND_MAX;
     line->scroll_x = (float)(screen_width + (rand() % 500));
-    line->scroll_speed = MIN_SCROLL_SPEED + (MAX_SCROLL_SPEED - MIN_SCROLL_SPEED) * random_factor;
+    float min_speed = config->scroll_speed_min;
+    float max_speed = config->scroll_speed_max;
+    if (max_speed <= min_speed) {
+        min_speed = DEFAULT_SCROLL_SPEED_MIN;
+        max_speed = DEFAULT_SCROLL_SPEED_MAX;
+    }
+    line->scroll_speed = min_speed + (max_speed - min_speed) * random_factor;
 
     return true;
+}
+
+int rebuild_headlines(struct Config *config, SDL_Renderer *renderer, TTF_Font *font, struct NewsLine *news_lines, int screen_width, int screen_height, const char *config_error_message, char *status_out, size_t status_len, bool *used_fallback_out) {
+    if (!config || !renderer || !font || !news_lines) {
+        if (status_out && status_len > 0) {
+            snprintf(status_out, status_len, "Unable to rebuild headlines: invalid arguments.");
+        }
+        if (used_fallback_out) {
+            *used_fallback_out = true;
+        }
+        return 0;
+    }
+
+    if (status_out && status_len > 0) {
+        status_out[0] = '\0';
+    }
+    if (used_fallback_out) {
+        *used_fallback_out = false;
+    }
+
+    clear_news_lines(news_lines, MAX_LINES);
+
+    int y_cursor = config->line_padding < 0 ? 0 : config->line_padding;
+    char fetch_error[STATUS_BUFFER] = {0};
+    int num_headlines = fetch_newsapi_headlines(config, renderer, font, news_lines, screen_width, screen_height, &y_cursor, fetch_error, sizeof(fetch_error));
+    if (num_headlines > 0) {
+        if (status_out && status_len > 0) {
+            snprintf(status_out, status_len, "Fetched %d headlines from NewsAPI.", num_headlines);
+        }
+        return num_headlines;
+    }
+
+    if (used_fallback_out) {
+        *used_fallback_out = true;
+    }
+
+    if (fetch_error[0]) {
+        fprintf(stderr, "%s\n", fetch_error);
+    }
+    fprintf(stderr, "Using fallback headlines.\n");
+
+    y_cursor = config->line_padding < 0 ? 0 : config->line_padding;
+    num_headlines = 0;
+
+    if (config_error_message && config_error_message[0] != '\0') {
+        size_t len = strlen(config_error_message) + 1;
+        char *error_line = malloc(len);
+        if (error_line) {
+            snprintf(error_line, len, "%s", config_error_message);
+            if (num_headlines < MAX_LINES && init_news_line(&news_lines[num_headlines], renderer, font, error_line, true, (SDL_Color){255, 80, 80, 255}, screen_width, screen_height, &y_cursor, config)) {
+                num_headlines++;
+            }
+        }
+    }
+
+    if (fetch_error[0]) {
+        size_t len = strlen(fetch_error) + 32;
+        char *status_line = malloc(len);
+        if (status_line) {
+            snprintf(status_line, len, "Falling back: %s", fetch_error);
+            if (num_headlines < MAX_LINES && init_news_line(&news_lines[num_headlines], renderer, font, status_line, true, (SDL_Color){255, 160, 0, 255}, screen_width, screen_height, &y_cursor, config)) {
+                num_headlines++;
+            }
+        }
+    }
+
+    for (int i = 0; fallback_news[i] != NULL && i < MAX_LINES; ++i) {
+        if (num_headlines >= MAX_LINES) {
+            break;
+        }
+        size_t len = strlen(fallback_news[i]) + 1;
+        char *fallback_copy = malloc(len);
+        if (!fallback_copy) {
+            continue;
+        }
+        snprintf(fallback_copy, len, "%s", fallback_news[i]);
+
+        int color_index = 0;
+        if (config->num_colors > 0) {
+            color_index = rand() % config->num_colors;
+        }
+        SDL_Color color = config->colors[color_index];
+        if (init_news_line(&news_lines[num_headlines], renderer, font, fallback_copy, true, color, screen_width, screen_height, &y_cursor, config)) {
+            num_headlines++;
+        }
+    }
+
+    if (status_out && status_len > 0) {
+        if (fetch_error[0]) {
+            snprintf(status_out, status_len, "Fallback headlines (%s).", fetch_error);
+        } else if (config_error_message && config_error_message[0] != '\0') {
+            snprintf(status_out, status_len, "Fallback headlines (configuration issue).");
+        } else {
+            snprintf(status_out, status_len, "Fallback headlines loaded.");
+        }
+    }
+
+    return num_headlines;
+}
+
+static int fetch_newsapi_headlines(const struct Config *config, SDL_Renderer *renderer, TTF_Font *font, struct NewsLine *news_lines, int screen_width, int screen_height, int *y_cursor, char *fetch_error, size_t fetch_error_len) {
+    if (fetch_error && fetch_error_len > 0) {
+        fetch_error[0] = '\0';
+    }
+
+    if (!config || !renderer || !font || !news_lines || !y_cursor) {
+        if (fetch_error && fetch_error_len > 0) {
+            snprintf(fetch_error, fetch_error_len, "Invalid arguments supplied to fetch_newsapi_headlines.");
+        }
+        return 0;
+    }
+
+    char api_url[512];
+    snprintf(api_url, sizeof(api_url), "https://newsapi.org/v2/top-headlines?country=%s&pageSize=%d&apiKey=%s", config->country_code, MAX_LINES, config->api_key);
+    fprintf(stdout, "Attempting to fetch news from: %s\n", api_url);
+
+    CURL* curl_handle = curl_easy_init();
+    if (!curl_handle) {
+        if (fetch_error && fetch_error_len > 0) {
+            snprintf(fetch_error, fetch_error_len, "Unable to initialize network client.");
+        }
+        return 0;
+    }
+
+    curl_easy_setopt(curl_handle, CURLOPT_URL, api_url);
+    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "news-ticker/1.0");
+    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT_MS, 5000L);
+    char curl_error[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, curl_error);
+
+    int num_headlines = 0;
+    for (int attempt = 0; attempt < MAX_FETCH_ATTEMPTS && num_headlines == 0; ++attempt) {
+        struct MemoryStruct chunk = { .memory = malloc(1), .size = 0 };
+        if (!chunk.memory) {
+            if (fetch_error && fetch_error_len > 0) {
+                snprintf(fetch_error, fetch_error_len, "Out of memory before requesting headlines.");
+            }
+            break;
+        }
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
+
+        CURLcode res = curl_easy_perform(curl_handle);
+        if (res != CURLE_OK) {
+            if (fetch_error && fetch_error_len > 0) {
+                snprintf(fetch_error, fetch_error_len, "Request failed (%s)", curl_error[0] ? curl_error : curl_easy_strerror(res));
+            }
+        } else {
+            cJSON* json = cJSON_Parse(chunk.memory);
+            if (json == NULL) {
+                if (fetch_error && fetch_error_len > 0) {
+                    snprintf(fetch_error, fetch_error_len, "NewsAPI returned invalid JSON.");
+                }
+            } else {
+                cJSON* status = cJSON_GetObjectItemCaseSensitive(json, "status");
+                if (!cJSON_IsString(status) || strcmp(status->valuestring, "ok") != 0) {
+                    if (fetch_error && fetch_error_len > 0) {
+                        snprintf(fetch_error, fetch_error_len, "NewsAPI error: status != ok.");
+                    }
+                } else {
+                    cJSON* articles = cJSON_GetObjectItemCaseSensitive(json, "articles");
+                    cJSON* article = NULL;
+                    cJSON_ArrayForEach(article, articles) {
+                        if (!cJSON_IsObject(article)) continue;
+                        if (num_headlines >= MAX_LINES) break;
+
+                        cJSON* title_json = cJSON_GetObjectItemCaseSensitive(article, "title");
+                        if (!cJSON_IsString(title_json) || !title_json->valuestring) continue;
+
+                        char* sanitized = sanitize_headline(title_json->valuestring);
+                        if (!sanitized || sanitized[0] == '\0') {
+                            if (sanitized) free(sanitized);
+                            continue;
+                        }
+
+                        size_t final_len = strlen(sanitized) + 2;
+                        char* headline = malloc(final_len);
+                        if (!headline) {
+                            free(sanitized);
+                            if (fetch_error && fetch_error_len > 0) {
+                                snprintf(fetch_error, fetch_error_len, "Out of memory building headline.");
+                            }
+                            break;
+                        }
+                        snprintf(headline, final_len, "%s ", sanitized);
+                        free(sanitized);
+
+                        int color_index = 0;
+                        if (config->num_colors > 0) {
+                            color_index = rand() % config->num_colors;
+                        }
+                        SDL_Color color = config->colors[color_index];
+                        if (init_news_line(&news_lines[num_headlines], renderer, font, headline, true, color, screen_width, screen_height, y_cursor, config)) {
+                            num_headlines++;
+                        }
+                    }
+
+                    if (num_headlines > 0 && fetch_error && fetch_error_len > 0) {
+                        fetch_error[0] = '\0';
+                    }
+                }
+                cJSON_Delete(json);
+            }
+        }
+
+        free(chunk.memory);
+        if (num_headlines > 0) {
+            break;
+        }
+        if (attempt < MAX_FETCH_ATTEMPTS - 1) {
+            SDL_Delay(250 * (attempt + 1));
+        }
+    }
+
+    curl_easy_cleanup(curl_handle);
+    return num_headlines;
 }
 
 void append_message(char *buffer, size_t len, const char *message) {
