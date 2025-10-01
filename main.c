@@ -39,7 +39,8 @@ struct Config {
 // Holds the data for a single scrolling line of text
 struct NewsLine {
     char* text;
-    int scroll_x;
+    bool owns_text;
+    float scroll_x;
     float scroll_speed;
     int y_position;
     SDL_Color color;
@@ -57,6 +58,11 @@ struct MemoryStruct {
 // --- Constants ---
 #define MAX_LINES 20 // Maximum number of headlines to display
 #define LINE_PADDING 10 // Vertical space between lines
+#define MIN_SCROLL_SPEED 90.0f // Pixels per second
+#define MAX_SCROLL_SPEED 220.0f // Pixels per second
+#define MAX_FETCH_ATTEMPTS 3
+
+#define STATUS_BUFFER 256
 
 // --- Globals ---
 const char* fallback_news[] = {
@@ -69,9 +75,15 @@ const char* fallback_news[] = {
 
 // --- Function Prototypes ---
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp);
-void parse_config(struct Config* config);
+bool parse_config(struct Config* config, char *error_message, size_t message_len);
 void render_text(SDL_Renderer* renderer, TTF_Font* font, struct NewsLine* line);
 void trim_whitespace(char *str);
+char* sanitize_headline(const char *title);
+void release_news_line(struct NewsLine *line);
+bool init_news_line(struct NewsLine *line, SDL_Renderer *renderer, TTF_Font *font, char *text, bool owns_text, SDL_Color color, int screen_width, int screen_height, int *y_cursor);
+void append_message(char *buffer, size_t len, const char *message);
+char normalize_ascii_char(unsigned char c);
+size_t utf8_sequence_length(unsigned char lead_byte);
 
 
 // --- Main Function ---
@@ -80,7 +92,11 @@ int main(int argc, char* argv[]) {
 
     // --- Load Configuration ---
     struct Config config;
-    parse_config(&config);
+    char config_error[STATUS_BUFFER] = {0};
+    bool config_ok = parse_config(&config, config_error, sizeof(config_error));
+    if (!config_ok && config_error[0] != '\0') {
+        fprintf(stderr, "%s\n", config_error);
+    }
 
     // --- SDL & TTF Initialization ---
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
@@ -116,73 +132,145 @@ int main(int argc, char* argv[]) {
     struct NewsLine news_lines[MAX_LINES] = {0};
     int num_headlines = 0;
     bool use_fallback = false;
+    int y_cursor = LINE_PADDING;
+    char fetch_error[STATUS_BUFFER] = {0};
 
     // --- Fetch and Parse News ---
     char api_url[512];
     // Use the country_code from the config struct
     snprintf(api_url, sizeof(api_url), "https://newsapi.org/v2/top-headlines?country=%s&pageSize=%d&apiKey=%s", config.country_code, MAX_LINES, config.api_key);
-    
+
     fprintf(stdout, "Attempting to fetch news from: %s\n", api_url);
 
-    struct MemoryStruct chunk = { .memory = malloc(1), .size = 0 };
     CURL* curl_handle = curl_easy_init();
-    curl_easy_setopt(curl_handle, CURLOPT_URL, api_url);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
-    curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "news-ticker/1.0");
-    CURLcode res = curl_easy_perform(curl_handle);
-
-    if (res != CURLE_OK) {
-        fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+    if (!curl_handle) {
+        snprintf(fetch_error, sizeof(fetch_error), "Unable to initialize network client.");
         use_fallback = true;
     } else {
-        cJSON* json = cJSON_Parse(chunk.memory);
-        if (json == NULL || cJSON_GetObjectItemCaseSensitive(json, "status") == NULL || strcmp(cJSON_GetObjectItemCaseSensitive(json, "status")->valuestring, "ok") != 0) {
-            fprintf(stderr, "API returned an error or JSON is invalid.\n");
-            use_fallback = true;
-        } else {
-            cJSON* articles = cJSON_GetObjectItemCaseSensitive(json, "articles");
-            cJSON* article = NULL;
-            cJSON_ArrayForEach(article, articles) {
-                if (num_headlines >= MAX_LINES) break;
-                cJSON* title_json = cJSON_GetObjectItemCaseSensitive(article, "title");
-                if (cJSON_IsString(title_json) && (title_json->valuestring != NULL)) {
-                    char* title_str = title_json->valuestring;
-                    news_lines[num_headlines].text = malloc(strlen(title_str) + 2);
-                    sprintf(news_lines[num_headlines].text, "%s ", title_str); // Add space for looping
-                    
-                    news_lines[num_headlines].color = config.colors[rand() % config.num_colors];
-                    render_text(renderer, font, &news_lines[num_headlines]);
+        curl_easy_setopt(curl_handle, CURLOPT_URL, api_url);
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+        curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "news-ticker/1.0");
+        curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT_MS, 5000L);
+        char curl_error[CURL_ERROR_SIZE] = {0};
+        curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, curl_error);
 
-                    news_lines[num_headlines].scroll_x = SCREEN_WIDTH + (rand() % 500);
-                    news_lines[num_headlines].scroll_speed = 1.5f + (rand() / (float)RAND_MAX) * 2.5f;
-                    news_lines[num_headlines].y_position = (num_headlines * (news_lines[num_headlines].texture_height + LINE_PADDING)) + LINE_PADDING;
-                    
+        for (int attempt = 0; attempt < MAX_FETCH_ATTEMPTS && num_headlines == 0; ++attempt) {
+            struct MemoryStruct chunk = { .memory = malloc(1), .size = 0 };
+            curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
+            CURLcode res = curl_easy_perform(curl_handle);
+
+            if (res != CURLE_OK) {
+                snprintf(fetch_error, sizeof(fetch_error), "Request failed (%s)", curl_error[0] ? curl_error : curl_easy_strerror(res));
+            } else {
+                cJSON* json = cJSON_Parse(chunk.memory);
+                if (json == NULL) {
+                    snprintf(fetch_error, sizeof(fetch_error), "NewsAPI returned invalid JSON.");
+                } else {
+                    cJSON* status = cJSON_GetObjectItemCaseSensitive(json, "status");
+                    if (!cJSON_IsString(status) || strcmp(status->valuestring, "ok") != 0) {
+                        snprintf(fetch_error, sizeof(fetch_error), "NewsAPI error: status != ok.");
+                    } else {
+                        cJSON* articles = cJSON_GetObjectItemCaseSensitive(json, "articles");
+                        cJSON* article = NULL;
+                        cJSON_ArrayForEach(article, articles) {
+                            if (!cJSON_IsObject(article)) continue;
+                            if (num_headlines >= MAX_LINES) break;
+                            cJSON* title_json = cJSON_GetObjectItemCaseSensitive(article, "title");
+                            if (!cJSON_IsString(title_json) || !title_json->valuestring) continue;
+
+                            char* sanitized = sanitize_headline(title_json->valuestring);
+                            if (!sanitized || sanitized[0] == '\0') {
+                                if (sanitized) free(sanitized);
+                                continue;
+                            }
+
+                            size_t final_len = strlen(sanitized) + 2;
+                            char* headline = malloc(final_len);
+                            if (!headline) {
+                                free(sanitized);
+                                snprintf(fetch_error, sizeof(fetch_error), "Out of memory building headline.");
+                                break;
+                            }
+                            snprintf(headline, final_len, "%s ", sanitized);
+                            free(sanitized);
+
+                            SDL_Color color = config.colors[rand() % config.num_colors];
+                            if (init_news_line(&news_lines[num_headlines], renderer, font, headline, true, color, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
+                                num_headlines++;
+                            }
+                        }
+                        if (num_headlines > 0) {
+                            fetch_error[0] = '\0';
+                        }
+                    }
+                    cJSON_Delete(json);
+                }
+            }
+
+            free(chunk.memory);
+            if (num_headlines > 0) {
+                break;
+            }
+            if (attempt < MAX_FETCH_ATTEMPTS - 1) {
+                SDL_Delay(250 * (attempt + 1));
+            }
+        }
+        curl_easy_cleanup(curl_handle);
+        if (num_headlines == 0) {
+            use_fallback = true;
+        }
+    }
+
+    if (use_fallback || num_headlines == 0) {
+        fprintf(stderr, "Using fallback headlines.\n");
+        for (int i = 0; i < MAX_LINES; ++i) {
+            release_news_line(&news_lines[i]);
+        }
+        num_headlines = 0;
+        y_cursor = LINE_PADDING;
+
+        if (!config_ok && config_error[0]) {
+            size_t len = strlen(config_error) + 2;
+            char* error_line = malloc(len);
+            if (error_line) {
+                snprintf(error_line, len, "%s", config_error);
+                if (init_news_line(&news_lines[num_headlines], renderer, font, error_line, true, (SDL_Color){255, 80, 80, 255}, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
                     num_headlines++;
                 }
             }
         }
-        cJSON_Delete(json);
-    }
-    free(chunk.memory);
-    curl_easy_cleanup(curl_handle);
 
-    if (use_fallback || num_headlines == 0) {
-        fprintf(stderr, "Using fallback headlines.\n");
+        if (fetch_error[0]) {
+            size_t len = strlen(fetch_error) + 32;
+            char* status_line = malloc(len);
+            if (status_line) {
+                snprintf(status_line, len, "Falling back: %s", fetch_error);
+                if (init_news_line(&news_lines[num_headlines], renderer, font, status_line, true, (SDL_Color){255, 160, 0, 255}, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
+                    num_headlines++;
+                }
+            }
+        }
+
         for (int i = 0; fallback_news[i] != NULL && i < MAX_LINES; ++i) {
-            news_lines[i].text = (char*)fallback_news[i];
-            news_lines[i].color = config.colors[rand() % config.num_colors];
-            render_text(renderer, font, &news_lines[i]);
-            news_lines[i].scroll_x = SCREEN_WIDTH + (rand() % 500);
-            news_lines[i].scroll_speed = 1.5f + (rand() / (float)RAND_MAX) * 2.5f;
-            news_lines[i].y_position = (i * (news_lines[i].texture_height + LINE_PADDING)) + LINE_PADDING;
-            num_headlines++;
+            if (num_headlines >= MAX_LINES) break;
+            char* fallback_copy = NULL;
+            size_t len = strlen(fallback_news[i]) + 1;
+            fallback_copy = malloc(len);
+            if (!fallback_copy) {
+                continue;
+            }
+            snprintf(fallback_copy, len, "%s", fallback_news[i]);
+            SDL_Color color = config.colors[rand() % config.num_colors];
+            if (init_news_line(&news_lines[num_headlines], renderer, font, fallback_copy, true, color, SCREEN_WIDTH, SCREEN_HEIGHT, &y_cursor)) {
+                num_headlines++;
+            }
         }
     }
 
     // --- Main Loop ---
     bool is_running = true;
     bool is_paused = false;
+    Uint32 last_ticks = SDL_GetTicks();
     while (is_running) {
         SDL_Event e;
         while (SDL_PollEvent(&e) != 0) {
@@ -193,14 +281,21 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        Uint32 current_ticks = SDL_GetTicks();
+        float delta_seconds = (current_ticks - last_ticks) / 1000.0f;
+        last_ticks = current_ticks;
+
         // --- Update ---
         if (!is_paused) {
             for (int i = 0; i < num_headlines; ++i) {
-                news_lines[i].scroll_x -= news_lines[i].scroll_speed;
+                if (!news_lines[i].texture) continue;
+                news_lines[i].scroll_x -= news_lines[i].scroll_speed * delta_seconds;
                 if (news_lines[i].scroll_x < -news_lines[i].texture_width) {
-                    news_lines[i].scroll_x = SCREEN_WIDTH;
+                    news_lines[i].scroll_x = SCREEN_WIDTH + (rand() % 500);
                 }
             }
+        } else {
+            last_ticks = current_ticks;
         }
 
         // --- Drawing ---
@@ -208,7 +303,8 @@ int main(int argc, char* argv[]) {
         SDL_RenderClear(renderer);
 
         for (int i = 0; i < num_headlines; ++i) {
-            SDL_Rect dstRect = { news_lines[i].scroll_x, news_lines[i].y_position, news_lines[i].texture_width, news_lines[i].texture_height };
+            if (!news_lines[i].texture) continue;
+            SDL_Rect dstRect = { (int)news_lines[i].scroll_x, news_lines[i].y_position, news_lines[i].texture_width, news_lines[i].texture_height };
             SDL_RenderCopy(renderer, news_lines[i].texture, NULL, &dstRect);
         }
 
@@ -217,8 +313,7 @@ int main(int argc, char* argv[]) {
 
     // --- Cleanup ---
     for (int i = 0; i < num_headlines; ++i) {
-        if(news_lines[i].texture) SDL_DestroyTexture(news_lines[i].texture);
-        if (!use_fallback) free(news_lines[i].text);
+        release_news_line(&news_lines[i]);
     }
     TTF_CloseFont(font);
     SDL_DestroyRenderer(renderer);
@@ -264,7 +359,11 @@ void trim_whitespace(char *str) {
 }
 
 
-void parse_config(struct Config* config) {
+bool parse_config(struct Config* config, char *error_message, size_t message_len) {
+    if (error_message && message_len > 0) {
+        error_message[0] = '\0';
+    }
+
     // Set defaults first
     strcpy(config->api_key, "YOUR_API_KEY");
     strcpy(config->font_path, "font.ttf");
@@ -278,10 +377,11 @@ void parse_config(struct Config* config) {
     config->colors[4] = (SDL_Color){255, 0, 255, 255};   // Magenta
     config->num_colors = 5;
 
+    bool valid = true;
     FILE* file = fopen("config.ini", "r");
     if (!file) {
-        fprintf(stderr, "Could not open config.ini. Using default values.\n");
-        return;
+        append_message(error_message, message_len, "config.ini missing; using defaults.");
+        return false;
     }
 
     char line[256];
@@ -298,18 +398,47 @@ void parse_config(struct Config* config) {
             trim_whitespace(value);
 
             if (strcmp(key, "api_key") == 0) strcpy(config->api_key, value);
-            if (strcmp(key, "font_path") == 0) strcpy(config->font_path, value);
-            if (strcmp(key, "font_size") == 0) config->font_size = atoi(value);
-            if (strcmp(key, "country_code") == 0) strncpy(config->country_code, value, sizeof(config->country_code) - 1);
+            else if (strcmp(key, "font_path") == 0) strcpy(config->font_path, value);
+            else if (strcmp(key, "font_size") == 0) config->font_size = atoi(value);
+            else if (strcmp(key, "country_code") == 0) strncpy(config->country_code, value, sizeof(config->country_code) - 1);
         }
     }
     fclose(file);
 
-    // Add a debug print to confirm loaded settings
-    fprintf(stdout, "Config loaded: Country='%s', Font='%s', Size=%d, API_Key='%s'\n", config->country_code, config->font_path, config->font_size, config->api_key);
-    if (strcmp(config->api_key, "YOUR_API_KEY") == 0) {
-        fprintf(stderr, "WARNING: Default API key is being used. Please edit config.ini\n");
+    // Normalize country code to lowercase
+    for (size_t i = 0; config->country_code[i] != '\0'; ++i) {
+        config->country_code[i] = (char)tolower((unsigned char)config->country_code[i]);
     }
+
+    if (strcmp(config->api_key, "YOUR_API_KEY") == 0 || strlen(config->api_key) < 8) {
+        append_message(error_message, message_len, "Set a valid api_key in config.ini.");
+        valid = false;
+    }
+
+    if (config->font_size <= 0) {
+        append_message(error_message, message_len, "font_size must be positive; fallback to 28.");
+        config->font_size = 28;
+        valid = false;
+    }
+
+    size_t code_len = strlen(config->country_code);
+    if (code_len != 2) {
+        append_message(error_message, message_len, "country_code must be a 2-letter ISO code.");
+        strcpy(config->country_code, "us");
+        valid = false;
+    }
+
+    FILE *font_check = fopen(config->font_path, "r");
+    if (!font_check) {
+        append_message(error_message, message_len, "Configured font not found; attempting system fallback.");
+        valid = false;
+    } else {
+        fclose(font_check);
+    }
+
+    fprintf(stdout, "Config loaded: Country='%s', Font='%s', Size=%d\n", config->country_code, config->font_path, config->font_size);
+
+    return valid;
 }
 
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -325,4 +454,165 @@ static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, voi
     mem->size += realsize;
     mem->memory[mem->size] = 0;
     return realsize;
+}
+
+char* sanitize_headline(const char *title) {
+    if (!title) return NULL;
+    size_t len = strlen(title);
+    if (len == 0) return NULL;
+
+    char *buffer = malloc(len + 1);
+    if (!buffer) return NULL;
+
+    size_t out = 0;
+    bool last_was_space = false;
+    for (size_t i = 0; i < len;) {
+        unsigned char c = (unsigned char)title[i];
+        if (c == '\0') break;
+
+        if (c < 0x80) {
+            char normalized = normalize_ascii_char(c);
+            if (normalized == '\0') {
+                ++i;
+                continue;
+            }
+            if (normalized == ' ') {
+                if (out == 0 || last_was_space) {
+                    ++i;
+                    continue;
+                }
+                buffer[out++] = ' ';
+                last_was_space = true;
+            } else {
+                buffer[out++] = normalized;
+                last_was_space = false;
+            }
+            ++i;
+        } else {
+            if (out > 0 && !last_was_space) {
+                buffer[out++] = ' ';
+                last_was_space = true;
+            }
+            size_t advance = utf8_sequence_length(c);
+            if (advance == 0) {
+                advance = 1;
+            }
+            i += advance;
+        }
+    }
+
+    while (out > 0 && buffer[out - 1] == ' ') {
+        --out;
+    }
+
+    buffer[out] = '\0';
+
+    return buffer;
+}
+
+void release_news_line(struct NewsLine *line) {
+    if (!line) return;
+    if (line->texture) {
+        SDL_DestroyTexture(line->texture);
+        line->texture = NULL;
+    }
+    if (line->owns_text && line->text) {
+        free(line->text);
+    }
+    line->text = NULL;
+    line->owns_text = false;
+    line->scroll_x = 0.0f;
+    line->scroll_speed = 0.0f;
+    line->texture_width = 0;
+    line->texture_height = 0;
+    line->y_position = 0;
+}
+
+bool init_news_line(struct NewsLine *line, SDL_Renderer *renderer, TTF_Font *font, char *text, bool owns_text, SDL_Color color, int screen_width, int screen_height, int *y_cursor) {
+    if (!line || !renderer || !font || !text || !y_cursor) {
+        if (owns_text) free(text);
+        return false;
+    }
+
+    release_news_line(line);
+    line->text = text;
+    line->owns_text = owns_text;
+    line->color = color;
+
+    render_text(renderer, font, line);
+    if (!line->texture || line->texture_height == 0) {
+        release_news_line(line);
+        return false;
+    }
+
+    if (*y_cursor + line->texture_height > screen_height - LINE_PADDING) {
+        release_news_line(line);
+        return false;
+    }
+
+    line->y_position = *y_cursor;
+    *y_cursor += line->texture_height + LINE_PADDING;
+    float random_factor = rand() / (float)RAND_MAX;
+    line->scroll_x = (float)(screen_width + (rand() % 500));
+    line->scroll_speed = MIN_SCROLL_SPEED + (MAX_SCROLL_SPEED - MIN_SCROLL_SPEED) * random_factor;
+
+    return true;
+}
+
+void append_message(char *buffer, size_t len, const char *message) {
+    if (!buffer || len == 0 || !message || message[0] == '\0') {
+        return;
+    }
+
+    size_t current = strlen(buffer);
+    if (current > 0 && current < len - 1) {
+        strncat(buffer, " ", len - current - 1);
+        current = strlen(buffer);
+    }
+    strncat(buffer, message, len - current - 1);
+}
+
+char normalize_ascii_char(unsigned char c) {
+    if (c == '\n' || c == '\r' || c == '\t' || c == '\v' || c == '\f') {
+        return ' ';
+    }
+    if (c == '\0') {
+        return '\0';
+    }
+    if (isalnum(c)) {
+        return (char)c;
+    }
+    switch (c) {
+        case ' ':
+        case '.':
+        case ',':
+        case ':':
+        case ';':
+        case '!':
+        case '?':
+        case '\'':
+        case '"':
+        case '-':
+        case '_':
+        case '/':
+        case '&':
+        case '(': 
+        case ')':
+        case '[':
+        case ']':
+        case '#':
+        case '$':
+        case '+':
+            return (char)c;
+        default:
+            return '\0';
+    }
+}
+
+size_t utf8_sequence_length(unsigned char lead_byte) {
+    if ((lead_byte & 0x80) == 0) return 1;
+    if ((lead_byte & 0xE0) == 0xC0) return 2;
+    if ((lead_byte & 0xF0) == 0xE0) return 3;
+    if ((lead_byte & 0xF8) == 0xF0) return 4;
+    return 0;
 }
