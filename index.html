@@ -3,89 +3,237 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>UK News Ticker</title>
+    <title>UK Intelligence Stream | Sleek Modern</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;900&family=Space+Grotesk:wght@300;500;700&display=swap');
+
+        :root {
+            --bg-base: #0a0a0c;
+            --panel-bg: rgba(20, 20, 25, 0.7);
+            --accent-primary: #ffffff;
+            --accent-dim: rgba(255, 255, 255, 0.4);
+            --border-glow: rgba(255, 255, 255, 0.08);
+            --font-main: 'Inter', sans-serif;
+            --font-tech: 'Space Grotesk', sans-serif;
+        }
+
         body {
-            background-color: #141414;
-            color: white;
+            background-color: var(--bg-base);
+            background-image: 
+                radial-gradient(circle at 50% -20%, rgba(255,255,255,0.05) 0%, transparent 50%),
+                radial-gradient(circle at 0% 100%, rgba(255,255,255,0.02) 0%, transparent 30%);
+            color: #fff;
             overflow: hidden;
             margin: 0;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: var(--font-main);
             height: 100vh;
             width: 100vw;
         }
+
+        /* Top Navigation / Status */
+        #top-bar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            height: 70px;
+            display: flex;
+            align-items: center;
+            padding: 0 40px;
+            z-index: 100;
+            border-bottom: 1px solid var(--border-glow);
+            backdrop-filter: blur(20px);
+            background: linear-gradient(to bottom, rgba(10,10,12,1), rgba(10,10,12,0.8));
+        }
+
+        .brand {
+            font-family: var(--font-tech);
+            font-weight: 900;
+            font-size: 18px;
+            letter-spacing: 4px;
+            margin-right: 40px;
+            border-left: 4px solid #fff;
+            padding-left: 15px;
+        }
+
+        /* News Line Styling */
         .ticker-container {
             position: relative;
             height: 100%;
             width: 100%;
+            padding-top: 80px;
         }
+
         .news-line {
             position: absolute;
             white-space: nowrap;
-            font-weight: bold;
+            font-family: var(--font-tech);
+            font-weight: 500;
+            text-transform: none;
+            letter-spacing: 0.5px;
             cursor: default;
             user-select: none;
             will-change: transform;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            transition: opacity 0.5s ease;
         }
-        #ui-overlay {
+
+        .line-index {
+            font-family: var(--font-main);
+            font-size: 10px;
+            font-weight: 900;
+            color: var(--accent-dim);
+            border: 1px solid var(--accent-dim);
+            padding: 1px 6px;
+            border-radius: 2px;
+            margin-right: 10px;
+        }
+
+        /* Bottom UI Overlay */
+        #bottom-panel {
             position: fixed;
-            top: 10px;
-            right: 10px;
-            background: rgba(0,0,0,0.6);
-            padding: 8px 12px;
-            border-radius: 8px;
-            font-size: 12px;
+            bottom: 30px;
+            left: 40px;
+            right: 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
             pointer-events: none;
             z-index: 100;
-            border: 1px solid #333;
+        }
+
+        .data-card {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-glow);
+            padding: 12px 20px;
+            border-radius: 2px;
+            backdrop-filter: blur(10px);
+        }
+
+        .label {
+            font-size: 9px;
+            font-weight: 800;
+            color: var(--accent-dim);
+            letter-spacing: 2px;
+            margin-bottom: 4px;
+            display: block;
+        }
+
+        .value {
+            font-family: var(--font-tech);
+            font-size: 14px;
+            color: #fff;
+        }
+
+        #pause-indicator {
+            position: fixed;
+            bottom: 0; left: 0; width: 100%; height: 4px;
+            background: #fff;
+            transform: scaleX(0);
+            transition: transform 0.3s ease;
+            z-index: 200;
+        }
+
+        body.paused #pause-indicator {
+            transform: scaleX(1);
+        }
+
+        body.paused .news-line {
+            opacity: 0.3;
+        }
+
+        .pulse {
+            width: 8px;
+            height: 8px;
+            background: #fff;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+            animation: pulse-anim 2s infinite;
+        }
+
+        @keyframes pulse-anim {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.5); opacity: 0.4; }
+            100% { transform: scale(1); opacity: 1; }
         }
     </style>
 </head>
 <body>
 
-    <div id="ui-overlay">
-        SPACE to Pause | ESC to Refresh
+    <div id="top-bar">
+        <div class="brand">UK_TOP_STREAM</div>
+        <div class="flex items-center gap-10">
+            <div>
+                <span class="label">NETWORK_STATUS</span>
+                <div class="flex items-center"><div class="pulse"></div><span class="value" id="status-text">ENCRYPTED_LINK</span></div>
+            </div>
+            <div>
+                <span class="label">LOCATION</span>
+                <span class="value">LON_GBR.NODE_01</span>
+            </div>
+        </div>
+        <div class="ml-auto text-right">
+            <span class="label">SYSTEM_CLOCK</span>
+            <span class="value" id="time-display">00:00:00</span>
+        </div>
     </div>
+
+    <div id="bottom-panel">
+        <div class="data-card">
+            <span class="label">DATA_SOURCE</span>
+            <span class="value">GUARDIAN_OPEN_PLATFORM</span>
+        </div>
+        <div class="data-card text-right">
+            <span class="label">CONTROLS</span>
+            <span class="value">[SPACE] HALT | [ESC] REBOOT</span>
+        </div>
+    </div>
+
+    <div id="pause-indicator"></div>
 
     <div class="ticker-container" id="container"></div>
 
     <script>
-        /**
-         * --- CONFIGURATION ---
-         * 1. Get a FREE API Key at: https://bonobo.theguardian.com/register/developer
-         * 2. Replace 'test' with your actual key.
-         */
         const CONFIG = {
-            apiKey: 'test', // 'test' works for limited queries, replace with your real key
-            fontSize: 32,
-            linePadding: 15,
-            scrollSpeedMin: 70,
-            scrollSpeedMax: 160,
-            refreshInterval: 600000, // 10 minutes
-            colors: ['#FFA500', '#00FFFF', '#FFFF00', '#00FF00', '#FF00FF', '#FFFFFF', '#FF4500']
+            apiKey: 'test', 
+            fontSize: 26,
+            linePadding: 24,
+            scrollSpeedMin: 50,
+            scrollSpeedMax: 120,
+            refreshInterval: 600000, 
+            // Minimal high-end palette
+            colors: [
+                '#ffffff', // White
+                '#e2e2e2', // Light grey
+                '#9ca3af', // Gray-400
+                '#60a5fa', // Soft Blue
+                '#f87171', // Soft Red
+                '#34d399'  // Soft Green
+            ]
         };
 
         const fallbackHeadlines = [
-            "THE GUARDIAN API: UK TOP STORIES WILL APPEAR HERE.",
-            "ERROR: NEWSAPI BLOCKS BROWSER REQUESTS ON FREE PLANS.",
-            "SWITCHED TO THE GUARDIAN API FOR BETTER UK COVERAGE.",
-            "PLEASE INSERT YOUR GUARDIAN API KEY IN THE CONFIG SECTION.",
-            "PRESS SPACE TO PAUSE. PRESS ESC TO RETRY FETCH."
+            "Initializing secure data uplink to UK news satellites...",
+            "Checking authentication tokens for Guardian Network access.",
+            "Local headlines cache empty. Re-establishing connection.",
+            "System standing by. Monitoring 15 active data channels.",
+            "Press SPACE to toggle system-wide motion freeze."
         ];
 
         let newsLines = [];
         let isPaused = false;
         let lastTimestamp = 0;
         const container = document.getElementById('container');
+        const statusText = document.getElementById('status-text');
 
         class NewsLine {
-            constructor(text, color, yPos) {
+            constructor(text, color, yPos, idx) {
                 this.text = text;
                 this.color = color;
                 this.y = yPos;
-                // Start off-screen to the right with some randomness
-                this.x = window.innerWidth + (Math.random() * 800);
+                this.x = window.innerWidth + (Math.random() * 1000);
                 this.speed = CONFIG.scrollSpeedMin + (Math.random() * (CONFIG.scrollSpeedMax - CONFIG.scrollSpeedMin));
                 
                 this.element = document.createElement('div');
@@ -93,10 +241,12 @@
                 this.element.style.fontSize = CONFIG.fontSize + 'px';
                 this.element.style.color = color;
                 this.element.style.top = yPos + 'px';
-                this.element.innerText = text;
+                
+                // Tech indexing
+                const indexTag = (idx + 1).toString().padStart(2, '0');
+                this.element.innerHTML = `<span class="line-index">${indexTag}</span> ${text}`;
+                
                 container.appendChild(this.element);
-
-                // Wait for layout to get width
                 this.width = this.element.offsetWidth;
             }
 
@@ -105,10 +255,8 @@
 
                 this.x -= this.speed * deltaTime;
                 
-                // Reset to right if fully off-screen to the left
                 if (this.x < -this.width) {
-                    this.x = window.innerWidth + 200;
-                    // Vary speed on each cycle like the C version
+                    this.x = window.innerWidth + 100;
                     this.speed = CONFIG.scrollSpeedMin + (Math.random() * (CONFIG.scrollSpeedMax - CONFIG.scrollSpeedMin));
                 }
                 
@@ -123,49 +271,46 @@
         }
 
         async function fetchNews() {
-            // The Guardian API is much more friendly to browser-based requests
-            // We search for UK news specifically.
+            statusText.innerText = "UPLINKING...";
             const url = `https://content.guardianapis.com/search?q=uk&api-key=${CONFIG.apiKey}&page-size=20`;
             
             try {
                 const response = await fetch(url);
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                
                 const data = await response.json();
 
                 if (data.response && data.response.status === 'ok') {
-                    return data.response.results.map(item => item.webTitle.toUpperCase());
+                    statusText.innerText = "FEED_ACTIVE";
+                    return data.response.results.map(item => item.webTitle);
                 } else {
-                    console.warn("Guardian API returned non-ok status:", data.response?.status);
-                    return null;
+                    throw new Error("API Limit");
                 }
             } catch (err) {
-                console.error("Fetch failure:", err);
+                statusText.innerText = "LOCAL_CACHE_MODE";
                 return null;
             }
         }
 
         async function rebuildTicker() {
             const rawHeadlines = await fetchNews();
-            
-            // Only use fallback if we actually failed to get results
             const headlines = (rawHeadlines && rawHeadlines.length > 0) ? rawHeadlines : fallbackHeadlines;
 
-            // Cleanup existing elements
             newsLines.forEach(line => line.remove());
             newsLines = [];
 
-            let yCursor = CONFIG.linePadding;
+            let yCursor = 110; // Start below top bar
             headlines.forEach((text, index) => {
                 const color = CONFIG.colors[index % CONFIG.colors.length];
-                
-                // Check if the next line will fit on screen
-                if (yCursor + CONFIG.fontSize > window.innerHeight) return;
+                if (yCursor + CONFIG.fontSize > window.innerHeight - 100) return;
 
-                const line = new NewsLine(text, color, yCursor);
+                const line = new NewsLine(text, color, yCursor, index);
                 newsLines.push(line);
                 yCursor += CONFIG.fontSize + CONFIG.linePadding;
             });
+        }
+
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('time-display').innerText = now.toLocaleTimeString('en-GB', { hour12: false });
         }
 
         function animate(timestamp) {
@@ -173,19 +318,14 @@
             const deltaTime = (timestamp - lastTimestamp) / 1000;
             lastTimestamp = timestamp;
 
-            // Independent updates for each line
             newsLines.forEach(line => line.update(deltaTime));
             requestAnimationFrame(animate);
         }
 
-        // --- Interaction Listeners ---
-
         window.addEventListener('keydown', (e) => {
             if (e.code === 'Space') {
                 isPaused = !isPaused;
-                const overlay = document.getElementById('ui-overlay');
-                overlay.innerText = isPaused ? "PAUSED" : "SPACE to Pause | ESC to Refresh";
-                overlay.style.color = isPaused ? "#ff4500" : "white";
+                document.body.classList.toggle('paused', isPaused);
             }
             if (e.code === 'Escape') {
                 rebuildTicker();
@@ -195,6 +335,8 @@
         window.addEventListener('load', () => {
             rebuildTicker();
             requestAnimationFrame(animate);
+            setInterval(updateClock, 1000);
+            updateClock();
 
             if (CONFIG.refreshInterval > 0) {
                 setInterval(rebuildTicker, CONFIG.refreshInterval);
@@ -202,10 +344,7 @@
         });
 
         window.addEventListener('resize', () => {
-            // Re-calc screen boundaries if window size changes
             lastTimestamp = 0; 
-            // We don't necessarily rebuild on resize to avoid flicker, 
-            // but the class handles screen width dynamically.
         });
     </script>
 </body>
